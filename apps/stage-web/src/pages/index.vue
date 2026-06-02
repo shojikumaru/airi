@@ -24,6 +24,7 @@ import { storeToRefs } from 'pinia'
 import { computed, onMounted, onUnmounted, ref, useTemplateRef, watch } from 'vue'
 
 const paused = ref(false)
+const catyBridgeEnabled = import.meta.env.VITE_CATY_BRIDGE_ENABLED === 'true'
 
 function handleSettingsOpen(open: boolean) {
   paused.value = open
@@ -80,6 +81,11 @@ async function startAudioInteraction() {
         return
 
       try {
+        if (catyBridgeEnabled) {
+          await chatStore.ingest(text, { model: 'caty-openclaw-bridge', chatProvider: {} as ChatProvider })
+          return
+        }
+
         const provider = await providersStore.getProviderInstance(activeChatProvider.value)
         if (!provider || !activeChatModel.value)
           return

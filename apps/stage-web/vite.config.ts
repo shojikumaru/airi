@@ -76,6 +76,22 @@ export default defineConfig({
     },
   },
   server: {
+    allowedHosts: [
+      'mac-mini.tailce2901.ts.net',
+      'koho.caty.ngrok.app',
+    ],
+    proxy: {
+      '/caty-bridge': {
+        target: 'http://127.0.0.1:6120',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/caty-bridge/, ''),
+      },
+      '/caty-public': {
+        target: 'http://127.0.0.1:8787',
+        changeOrigin: true,
+        rewrite: path => path.replace(/^\/caty-public/, ''),
+      },
+    },
     fs: {
       // To mute errors like:
       //   The request id ".../node_modules/@fontsource/sniglet/files/sniglet-latin-400-normal.woff" is outside of Vite serving allow list.
