@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, nextTick, ref } from 'vue'
 
 interface CatyBridgeResponse {
   text?: string
@@ -31,7 +31,11 @@ const sttListening = ref(false)
 const sttTranscript = ref('')
 const sttInterim = ref('')
 const sttError = ref('')
+const sttStatus = ref('idle')
+const sttRestartCount = ref(0)
 let activeRecognition: any | null = null
+let sttKeepListening = false
+let sttRestartTimer: number | null = null
 
 const ttsGenerating = ref(false)
 const ttsError = ref('')
@@ -40,7 +44,11 @@ const ttsLatencyMs = ref('')
 const ttsAudioBytes = ref('')
 const ttsPlaybackState = ref('idle')
 const autoPlayTts = ref(true)
+const ttsAutoplayPrimed = ref(false)
 const ttsAudioElement = ref<HTMLAudioElement | null>(null)
+let ttsAudioBlob: Blob | null = null
+let ttsAudioContext: AudioContext | null = null
+let activeTtsSource: AudioBufferSourceNode | null = null
 
 const speechRecognitionSupported = computed(() => {
   if (typeof window === 'undefined')
@@ -95,7 +103,39 @@ function stripEmojiForSpeech(text: string) {
     .trim()
 }
 
+function clearSttRestartTimer() {
+  if (sttRestartTimer !== null) {
+    window.clearTimeout(sttRestartTimer)
+    sttRestartTimer = null
+  }
+}
+
+async function primeTtsPlayback() {
+  if (typeof window === 'undefined')
+    return
+
+  try {
+    const AudioContextCtor = window.AudioContext || (window as any).webkitAudioContext
+    if (!AudioContextCtor)
+      return
+
+    if (!ttsAudioContext)
+      ttsAudioContext = new AudioContextCtor()
+
+    if (ttsAudioContext.state !== 'running')
+      await ttsAudioContext.resume()
+
+    ttsAutoplayPrimed.value = ttsAudioContext.state === 'running'
+  }
+  catch (err) {
+    ttsAutoplayPrimed.value = false
+    ttsError.value = err instanceof Error ? `自動再生の準備に失敗しました: ${err.message}` : '自動再生の準備に失敗しました。'
+  }
+}
+
 function stopVoiceInput() {
+  sttKeepListening = false
+  clearSttRestartTimer()
   if (activeRecognition) {
     try {
       activeRecognition.stop()
@@ -105,86 +145,148 @@ function stopVoiceInput() {
     }
   }
   sttListening.value = false
+  sttStatus.value = 'stopped'
 }
 
 function startVoiceInput() {
   if (typeof window === 'undefined')
     return
 
+  void primeTtsPlayback()
   sttError.value = ''
   sttTranscript.value = ''
   sttInterim.value = ''
+  sttRestartCount.value = 0
+  sttKeepListening = true
+  clearSttRestartTimer()
 
   const Recognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
   if (!Recognition) {
     sttError.value = 'このブラウザでは Web Speech API が使えません。Chrome系ブラウザで試してください。'
+    sttKeepListening = false
     return
   }
 
-  if (activeRecognition)
-    stopVoiceInput()
-
-  const recognition = new Recognition()
-  activeRecognition = recognition
-  recognition.lang = 'ja-JP'
-  recognition.continuous = false
-  recognition.interimResults = true
-  recognition.maxAlternatives = 1
-
-  recognition.onstart = () => {
-    sttListening.value = true
-    ttsPlaybackState.value = 'listening'
+  if (activeRecognition) {
+    try { activeRecognition.stop() }
+    catch {}
   }
 
-  recognition.onresult = (event: any) => {
-    let finalText = ''
-    let interimText = ''
-    for (let i = event.resultIndex; i < event.results.length; i += 1) {
-      const result = event.results[i]
-      const text = result?.[0]?.transcript || ''
-      if (result?.isFinal)
-        finalText += text
-      else
-        interimText += text
+  const startRecognition = () => {
+    const recognition = new Recognition()
+    activeRecognition = recognition
+    recognition.lang = 'ja-JP'
+    recognition.continuous = true
+    recognition.interimResults = true
+    recognition.maxAlternatives = 1
+
+    recognition.onstart = () => {
+      sttListening.value = true
+      sttStatus.value = 'listening'
+      if (ttsPlaybackState.value === 'idle')
+        ttsPlaybackState.value = 'listening'
     }
 
-    if (finalText) {
-      sttTranscript.value = `${sttTranscript.value}${finalText}`.trim()
-      message.value = sttTranscript.value
+    recognition.onresult = (event: any) => {
+      let finalText = ''
+      let interimText = ''
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i]
+        const text = result?.[0]?.transcript || ''
+        if (result?.isFinal)
+          finalText += text
+        else
+          interimText += text
+      }
+
+      if (finalText) {
+        sttTranscript.value = `${sttTranscript.value} ${finalText}`.replace(/\s+/g, ' ').trim()
+        message.value = sttTranscript.value
+      }
+      sttInterim.value = interimText.trim()
+      if (!finalText && interimText)
+        message.value = `${sttTranscript.value} ${interimText}`.trim()
     }
-    sttInterim.value = interimText.trim()
-    if (!finalText && interimText)
-      message.value = `${sttTranscript.value} ${interimText}`.trim()
+
+    recognition.onerror = (event: any) => {
+      const code = event?.error || 'unknown'
+      if (code === 'no-speech' && sttKeepListening) {
+        sttStatus.value = 'no-speech-restarting'
+        return
+      }
+      sttError.value = `音声認識エラー: ${code}`
+      if (code === 'not-allowed' || code === 'service-not-allowed' || code === 'aborted')
+        sttKeepListening = false
+    }
+
+    recognition.onend = () => {
+      sttInterim.value = ''
+      if (activeRecognition === recognition)
+        activeRecognition = null
+
+      if (sttKeepListening) {
+        sttStatus.value = 'restarting'
+        sttRestartTimer = window.setTimeout(() => {
+          sttRestartCount.value += 1
+          startRecognition()
+        }, 250)
+        return
+      }
+
+      sttListening.value = false
+      sttStatus.value = 'ended'
+      if (ttsPlaybackState.value === 'listening')
+        ttsPlaybackState.value = 'idle'
+    }
+
+    try {
+      recognition.start()
+    }
+    catch (err) {
+      sttError.value = err instanceof Error ? err.message : String(err)
+      sttListening.value = false
+      sttKeepListening = false
+      sttStatus.value = 'error'
+    }
   }
 
-  recognition.onerror = (event: any) => {
-    sttError.value = event?.error ? `音声認識エラー: ${event.error}` : '音声認識エラーが発生しました。'
-    sttListening.value = false
-  }
-
-  recognition.onend = () => {
-    sttListening.value = false
-    sttInterim.value = ''
-    if (activeRecognition === recognition)
-      activeRecognition = null
-    if (ttsPlaybackState.value === 'listening')
-      ttsPlaybackState.value = 'idle'
-  }
-
-  try {
-    recognition.start()
-  }
-  catch (err) {
-    sttError.value = err instanceof Error ? err.message : String(err)
-    sttListening.value = false
-  }
+  startRecognition()
 }
 
 async function playTtsAudio() {
-  if (!ttsAudioElement.value)
-    return
+  ttsError.value = ''
 
   try {
+    if (activeTtsSource) {
+      try { activeTtsSource.stop() }
+      catch {}
+      activeTtsSource = null
+    }
+
+    if (ttsAudioBlob) {
+      await primeTtsPlayback()
+      if (ttsAudioContext?.state === 'running') {
+        const buffer = await ttsAudioBlob.arrayBuffer()
+        const audioBuffer = await ttsAudioContext.decodeAudioData(buffer.slice(0))
+        const source = ttsAudioContext.createBufferSource()
+        source.buffer = audioBuffer
+        source.connect(ttsAudioContext.destination)
+        source.onended = () => {
+          if (activeTtsSource === source)
+            activeTtsSource = null
+          ttsPlaybackState.value = 'ended'
+        }
+        activeTtsSource = source
+        ttsPlaybackState.value = 'playing'
+        source.start()
+        return
+      }
+    }
+
+    await nextTick()
+    if (!ttsAudioElement.value)
+      throw new Error('audio element is not ready')
+
     ttsPlaybackState.value = 'playing'
     await ttsAudioElement.value.play()
     ttsPlaybackState.value = 'playing'
@@ -219,6 +321,7 @@ async function synthesizeTtsFromResponse(text: string) {
     }
 
     const blob = await res.blob()
+    ttsAudioBlob = blob
     if (ttsAudioUrl.value)
       URL.revokeObjectURL(ttsAudioUrl.value)
     ttsAudioUrl.value = URL.createObjectURL(blob)
@@ -226,10 +329,9 @@ async function synthesizeTtsFromResponse(text: string) {
     ttsAudioBytes.value = res.headers.get('X-Caty-Audio-Bytes') || String(blob.size)
     ttsPlaybackState.value = 'ready'
 
-    setTimeout(() => {
-      if (autoPlayTts.value)
-        void playTtsAudio()
-    }, 0)
+    await nextTick()
+    if (autoPlayTts.value)
+      await playTtsAudio()
   }
   catch (err) {
     ttsError.value = err instanceof Error ? err.message : String(err)
@@ -292,6 +394,7 @@ async function sendMessage() {
   if (!canSend.value)
     return
 
+  void primeTtsPlayback()
   loading.value = true
   error.value = ''
   response.value = null
@@ -374,7 +477,7 @@ async function sendMessage() {
             停止
           </button>
           <span class="text-xs text-slate-400">
-            Web Speech API: {{ speechRecognitionSupported ? 'available' : 'not available' }} / lang=ja-JP
+            Web Speech API: {{ speechRecognitionSupported ? 'available' : 'not available' }} / lang=ja-JP / mode=continuous / status={{ sttStatus }} / restarts={{ sttRestartCount }}
           </span>
         </div>
         <p v-if="sttTranscript || sttInterim" class="mt-3 text-sm text-sky-100 leading-6">
@@ -405,13 +508,19 @@ async function sendMessage() {
             Fish Audio TTS
           </p>
           <button
+            class="border border-amber-300/50 rounded-full px-4 py-2 text-sm text-amber-100 transition hover:bg-amber-300/10"
+            @click="primeTtsPlayback"
+          >
+            自動再生を準備
+          </button>
+          <button
             class="border border-amber-300/50 rounded-full px-4 py-2 text-sm text-amber-100 transition disabled:cursor-not-allowed hover:bg-amber-300/10 disabled:opacity-50"
             :disabled="!ttsAudioUrl"
             @click="playTtsAudio"
           >
             ▶ 再生
           </button>
-          <span class="text-xs text-slate-400">state={{ ttsPlaybackState }}</span>
+          <span class="text-xs text-slate-400">state={{ ttsPlaybackState }} / primed={{ ttsAutoplayPrimed ? 'yes' : 'no' }}</span>
         </div>
         <audio
           v-if="ttsAudioUrl"
