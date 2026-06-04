@@ -94,6 +94,31 @@ function stringField(value: unknown): string {
   return typeof value === 'string' ? value : ''
 }
 
+function isPrivateDidPublicHost(hostname: string): boolean {
+  const host = hostname.toLowerCase()
+  if (host === 'localhost' || host.endsWith('.local') || host.endsWith('.ts.net') || host.endsWith('.tailscale.net'))
+    return true
+  if (host.startsWith('127.') || host.startsWith('10.') || host.startsWith('192.168.'))
+    return true
+  const private172 = host.match(/^172\.(\d{1,2})\./)
+  return Boolean(private172 && Number(private172[1]) >= 16 && Number(private172[1]) <= 31)
+}
+
+function didTalkPayload(text: string): Record<string, number | string> {
+  const payload: Record<string, number | string> = {
+    text,
+    poll_timeout: 300,
+    poll_interval: 3,
+  }
+
+  // D-ID validates audio_url from its cloud. Tailnet / localhost URLs work in Sho's
+  // browser but are invisible to D-ID, so let the bridge use CATY_DID_PUBLIC_BASE_URL.
+  if (typeof window !== 'undefined' && !isPrivateDidPublicHost(window.location.hostname))
+    payload.public_base_url = `${window.location.origin}/caty-public`
+
+  return payload
+}
+
 function stripEmojiForSpeech(text: string) {
   // Fish Audio can vocalize emoji/symbols as unexpected words. Keep the visible
   // Caty response intact, but feed speech synthesis a calmer text-only variant.
@@ -355,12 +380,7 @@ async function generateDidFromResponse() {
     const res = await fetch('/caty-bridge/v1/did/talk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        text,
-        public_base_url: `${window.location.origin}/caty-public`,
-        poll_timeout: 300,
-        poll_interval: 3,
-      }),
+      body: JSON.stringify(didTalkPayload(text)),
     })
 
     const data = await res.json() as Record<string, unknown>
