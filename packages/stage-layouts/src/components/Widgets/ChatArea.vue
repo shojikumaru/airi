@@ -32,6 +32,7 @@ const TRAILING_NEWLINES_REGEX = /[\r\n]+$/
 const SEND_MODES = ['enter', 'ctrl-enter', 'double-enter'] as const
 type SendMode = (typeof SEND_MODES)[number]
 const sendMode = useLocalStorage<SendMode>('ui/chat/settings/send-mode', 'enter')
+const catyBridgeEnabled = import.meta.env.VITE_CATY_BRIDGE_ENABLED === 'true'
 const lastEnterTime = ref(0)
 
 const providersStore = useProvidersStore()
@@ -69,6 +70,14 @@ async function handleSend() {
   messageInput.value = ''
 
   try {
+    if (catyBridgeEnabled) {
+      await ingest(textToSend, {
+        chatProvider: {} as ChatProvider,
+        model: 'caty-openclaw-bridge',
+      })
+      return
+    }
+
     const providerConfig = providersStore.getProviderConfig(activeProvider.value)
 
     await ingest(textToSend, {

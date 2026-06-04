@@ -43,7 +43,7 @@ export const useOnboardingStore = defineStore('onboarding', () => {
   })
 
   // Check if first-time setup should be shown
-  const skipOnboardingPath = ['/auth/callback']
+  const skipOnboardingPath = ['/auth/callback', '/caty-test']
   const needsOnboarding = computed(() =>
     !authStore.isAuthenticated
     && !authStore.token
