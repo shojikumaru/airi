@@ -46,7 +46,8 @@ export function useVRMLipSync(audioNode: Ref<AudioBufferSourceNode | undefined, 
   watch([isReady, audioNode], ([ready, newAudioNode], [, oldAudioNode]) => {
     if (oldAudioNode && oldAudioNode !== newAudioNode) {
       try {
-        oldAudioNode.disconnect()
+        if (lipSyncNode.value)
+          oldAudioNode.disconnect(lipSyncNode.value)
       }
       catch {}
     }
@@ -57,7 +58,13 @@ export function useVRMLipSync(audioNode: Ref<AudioBufferSourceNode | undefined, 
     }
     catch {}
   }, { immediate: true })
-  onUnmounted(() => audioNode.value?.disconnect())
+  onUnmounted(() => {
+    try {
+      if (audioNode.value && lipSyncNode.value)
+        audioNode.value.disconnect(lipSyncNode.value)
+    }
+    catch {}
+  })
 
   function update(vrm?: VRMCore, delta = 0.016) {
     const node = lipSyncNode.value
